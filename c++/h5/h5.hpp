@@ -24,6 +24,7 @@
 
 #include "./array_interface.hpp"
 #include "./complex.hpp"
+#include "./conversion.hpp"
 #include "./file.hpp"
 #include "./format.hpp"
 #include "./generic.hpp"

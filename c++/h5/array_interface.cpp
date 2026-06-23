@@ -21,6 +21,7 @@
 
 #include "./array_interface.hpp"
 #include "./complex.hpp"
+#include "./conversion.hpp"
 #include "./macros.hpp"
 #include "./stl/string.hpp"
 
@@ -28,7 +29,7 @@
 #include <hdf5_hl.h>
 
 #include <algorithm>
-#include <iostream>
+#include <cstring>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -54,6 +55,24 @@ namespace h5::array_interface {
 
       // return the dataspace
       return dspace;
+    }
+
+    // Read an attribute with file datatype file_ty and convert it to the datatype of the (contiguous) view.
+    void read_attribute_converted(attribute const &attr, datatype file_ty, array_view const &v, std::string const &name) {
+      dataspace space     = H5Aget_space(attr);
+      auto const n_elem   = static_cast<size_t>(H5Sget_simple_extent_npoints(space));
+      auto const src_size = H5Tget_size(file_ty);
+      auto const dst_size = H5Tget_size(v.ty);
+
+      // H5Tconvert converts in place, so the buffer has to be large enough for both datatypes
+      std::vector<char> buf(n_elem * std::max(src_size, dst_size));
+      std::vector<char> bkg(n_elem * dst_size);
+      auto err = H5Aread(attr, file_ty, buf.data());
+      if (err < 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: Reading the attribute " + name + " failed");
+
+      err = H5Tconvert(file_ty, v.ty, n_elem, buf.data(), bkg.data(), detail::transfer_plist());
+      if (err < 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: Reading the attribute " + name + " failed");
+      std::memcpy(v.start, buf.data(), n_elem * dst_size);
     }
 
   } // namespace
@@ -152,7 +171,7 @@ namespace h5::array_interface {
 
     // write to the file dataset
     if (H5Sget_simple_extent_npoints(mem_dspace) > 0) { // avoid writing empty arrays
-      herr_t err = H5Dwrite(ds, v.ty, mem_dspace, H5S_ALL, H5P_DEFAULT, v.start);
+      herr_t err = H5Dwrite(ds, v.ty, mem_dspace, H5S_ALL, detail::transfer_plist(), v.start);
       if (err < 0)
         throw std::runtime_error("Error in h5::array_interface::write: Writing to the dataset " + name + " in the group" + g.name() + " failed");
     }
@@ -169,9 +188,7 @@ namespace h5::array_interface {
     if (v.slab.size() != sl.size()) throw std::runtime_error("Error in h5::array_interface::write_slice: Incompatible sizes");
 
     auto ds_info = get_dataset_info(g, name);
-    if (not hdf5_type_equal(v.ty, ds_info.ty))
-      throw std::runtime_error("Error in h5::array_interface::write_slice: Incompatible HDF5 types: " + get_name_of_h5_type(v.ty)
-                               + " != " + get_name_of_h5_type(ds_info.ty));
+    detail::check_conversion(v.ty, ds_info.ty, "Error in h5::array_interface::write_slice");
 
     // open existing dataset, get dataspace and select hyperslab
     dataset ds            = g.open_dataset(name);
@@ -185,7 +202,7 @@ namespace h5::array_interface {
 
     // write to the selected hyperslab of the file dataset
     if (H5Sget_simple_extent_npoints(file_dspace) > 0) {
-      err = H5Dwrite(ds, v.ty, mem_dspace, file_dspace, H5P_DEFAULT, v.start);
+      err = H5Dwrite(ds, v.ty, mem_dspace, file_dspace, detail::transfer_plist(), v.start);
       if (err < 0)
         throw std::runtime_error("Error in h5::array_interface::write_slice: Writing the dataset " + name + " in the group " + g.name() + " failed");
     }
@@ -203,7 +220,7 @@ namespace h5::array_interface {
     attribute attr = H5Acreate2(obj, name.c_str(), v.ty, mem_dspace, H5P_DEFAULT, H5P_DEFAULT);
     if (!attr.is_valid()) throw std::runtime_error("Error in h5::array_interface::write_attribute: Creating the attribute " + name + " failed");
 
-    // write to the attribute
+    // write to the attribute (it was created with the memory datatype, so no conversion takes place)
     herr_t err = H5Awrite(attr, v.ty, v.start);
     if (err < 0) throw std::runtime_error("Error in h5::array_interface::write_attribute: Writing to the attribute " + name + " failed");
   }
@@ -220,7 +237,6 @@ namespace h5::array_interface {
       if (err < 0) throw std::runtime_error("Error in h5::array_interface::read: selecting the hyperslab failed");
     }
 
-    // check consistency of input
     auto ds_info = get_dataset_info(g, name);
 
     // file dataset uses the {r:double, i:double} compound type (Julia HDF5.jl, h5py): retype the view to dcplx_t and drop the trailing-2 dim
@@ -234,13 +250,7 @@ namespace h5::array_interface {
       v.slab.block.pop_back();
     }
 
-    if (H5Tget_class(v.ty) != H5Tget_class(ds_info.ty))
-      throw std::runtime_error("Error in h5::array_interface::read: Incompatible HDF5 types: " + get_name_of_h5_type(v.ty)
-                               + " != " + get_name_of_h5_type(ds_info.ty));
-
-    if (not hdf5_type_equal(v.ty, ds_info.ty))
-      std::cerr << "WARNING: HDF5 type mismatch while reading into an array_view: " + get_name_of_h5_type(v.ty)
-            + " != " + get_name_of_h5_type(ds_info.ty) + "\n";
+    detail::check_conversion(ds_info.ty, v.ty, "Error in h5::array_interface::read");
 
     auto sl_size = sl.size();
     if (sl.empty()) { sl_size = std::accumulate(ds_info.lengths.begin(), ds_info.lengths.end(), (hsize_t)1, std::multiplies<>()); }
@@ -251,7 +261,7 @@ namespace h5::array_interface {
 
     // read the selected hyperslab from the file dataset
     if (H5Sget_simple_extent_npoints(file_dspace) > 0) {
-      herr_t err = H5Dread(ds, v.ty, mem_dspace, file_dspace, H5P_DEFAULT, v.start);
+      herr_t err = H5Dread(ds, v.ty, mem_dspace, file_dspace, detail::transfer_plist(), v.start);
       if (err < 0)
         throw std::runtime_error("Error in h5::array_interface::read: Reading the dataset " + name + " in the group " + g.name() + " failed");
     }
@@ -270,14 +280,17 @@ namespace h5::array_interface {
       throw std::runtime_error("Error in h5::array_interface::read_attribute: Attribute " + name + " has rank " + std::to_string(rank)
                                + " but the view has rank " + std::to_string(v.rank()));
 
-    // get datatype information
-    auto eq = H5Tequal(H5Aget_type(attr), v.ty);
-    if (eq < 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: H5Tequal call failed");
-    if (eq == 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: Incompatible HDF5 types");
+    // read the attribute without conversion if the datatypes are equal
+    datatype file_ty = H5Aget_type(attr);
+    if (hdf5_type_equal(file_ty, v.ty)) {
+      auto err = H5Aread(attr, v.ty, v.start);
+      if (err < 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: Reading the attribute " + name + " failed");
+      return;
+    }
 
-    // read the attribute
-    auto err = H5Aread(attr, v.ty, v.start);
-    if (err < 0) throw std::runtime_error("Error in h5::array_interface::read_attribute: Reading the attribute " + name + " failed");
+    // otherwise convert (H5Aread takes no transfer property list, so read the raw data and convert it with H5Tconvert)
+    detail::check_conversion(file_ty, v.ty, "Error in h5::array_interface::read_attribute");
+    read_attribute_converted(attr, file_ty, v, name);
   }
 
 } // namespace h5::array_interface

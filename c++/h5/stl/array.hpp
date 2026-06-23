@@ -28,7 +28,6 @@
 
 #include <algorithm>
 #include <array>
-#include <iostream>
 #include <string>
 #include <type_traits>
 
@@ -104,8 +103,6 @@ namespace h5 {
 
         // read non-complex data into std::array<std::complex>
         if (!ds_info.has_complex_attribute) {
-          std::cerr << "WARNING: HDF5 type mismatch while reading into a std::array: std::complex<" + get_name_of_h5_type(hdf5_type<T>())
-                + "> != " + get_name_of_h5_type(ds_info.ty) + "\n";
           std::array<double, N> tmp{};
           h5_read(g, name, tmp);
           std::copy(begin(tmp), end(tmp), begin(a));

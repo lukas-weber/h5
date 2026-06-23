@@ -19,6 +19,7 @@
 
 #include <array>
 #include <complex>
+#include <stdexcept>
 #include <string>
 
 TEST(H5, ArrayOfBasicTypes) {
@@ -63,8 +64,14 @@ TEST(H5, ArrayConvert) {
 
     std::array<long, 2> arr_long{};
     std::array<std::complex<double>, 2> arr_cplx;
-    h5::read(file, "arr_int", arr_long); // issues a warning
-    h5::read(file, "arr_dbl", arr_cplx); // issues a warning
+
+    // type mismatches are rejected by the default conversion policy, but real data can always be read into complex values
+    EXPECT_THROW(h5::read(file, "arr_int", arr_long), std::runtime_error);
+    h5::read(file, "arr_dbl", arr_cplx);
+
+    h5::set_conversion_policy(h5::conversion::checked);
+    h5::read(file, "arr_int", arr_long);
+    h5::set_conversion_policy(h5::conversion::exact);
 
     EXPECT_EQ((std::array{1l, 2l}), arr_long);
     EXPECT_EQ((std::array{1.5 + 0i, 2.5 + 0i}), arr_cplx);

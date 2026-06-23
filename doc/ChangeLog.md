@@ -59,6 +59,7 @@ Find below an itemized list of changes in this release.
 * Breaking: rename array_view::is_complex to has_cplx_trailing_dim to reflect the trailing-2-dim buffer-layout convention
 * Support read/write of std::variant as an HDF5 attribute
 * List allowed alternatives in std::variant read error messages
+* Breaking: type-mismatched reads now throw by default instead of issuing a warning; use `h5::set_conversion_policy(h5::conversion::checked)` to allow conversions that do not lose values (datasets and attributes)
 
 ### doc
 * Update documentation of python layer
